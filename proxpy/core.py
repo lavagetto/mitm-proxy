@@ -11,7 +11,7 @@
   Foundation, either version 3 of the License, or (at your option) any later
   version.
   
-  HyperDbg is distributed in the hope that it will be useful, but WITHOUT ANY
+  Proxpy is distributed in the hope that it will be useful, but WITHOUT ANY
   WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
   A PARTICULAR PURPOSE.  See the GNU General Public License for more details.
   
@@ -35,16 +35,19 @@ from history import *
 from http import *
 from https import *
 from logger import Logger
+import cert
+
+proxystate = None
 
 DEFAULT_CERT_FILE = "./cert/ncerts/proxpy.pem"
 
-proxystate = None
+
 
 class ProxyHandler(SocketServer.StreamRequestHandler):
     def __init__(self, request, client_address, server):
         self.peer = False
         self.keepalive = False
-        self.target = None
+        self.target= None
 
         # Just for debugging
         self.counter = 0
@@ -163,13 +166,20 @@ class ProxyHandler(SocketServer.StreamRequestHandler):
         if not self.doRequest(conn, "GET", req.getPath(), '', req.headers): return ''
         # Delegate response to plugin
         res = self._getresponse(conn)
-        res = ProxyPlugin.delegate(ProxyPlugin.EVENT_MANGLE_RESPONSE, res.clone())
+        if res is None:
+            proxystate.log.error("Error, empty response from server %s" % host)
+            return None
+        res = ProxyPlugin.delegate(ProxyPlugin.EVENT_MANGLE_RESPONSE, res.clone(), host)
         data = res.serialize()
         return data
 
     def doPOST(self, host, port, req):
         conn = self.createConnection(host, port)
-        params = urllib.urlencode(req.getParams(HTTPRequest.METHOD_POST))
+        if 'SOAPAction' in req.headers:
+            params = req.body
+        else:
+            #TODO: allow plugins to mingle with post requests as well.
+            params = urllib.urlencode(req.getParams(HTTPRequest.METHOD_POST))
         if not self.doRequest(conn, "POST", req.getPath(), params, req.headers): return ''
         # Delegate response to plugin
         res = self._getresponse(conn)
@@ -180,9 +190,10 @@ class ProxyHandler(SocketServer.StreamRequestHandler):
     def doCONNECT(self, host, port, req):
         global proxystate
 
-        socket_req = self.request
-        certfilename = DEFAULT_CERT_FILE
-        socket_ssl = ssl.wrap_socket(socket_req, server_side = True, certfile = certfilename, 
+        socket_req = self.request        
+        cert.Certificate.fallback_cert = DEFAULT_CERT_FILE
+        c = cert.Certificate(host, proxystate.log)
+        socket_ssl = ssl.wrap_socket(socket_req, server_side = True, certfile = c.cert_path, 
                                      ssl_version = ssl.PROTOCOL_SSLv23, do_handshake_on_connect = False)
 
         HTTPSRequest.sendAck(socket_req)
@@ -195,7 +206,7 @@ class ProxyHandler(SocketServer.StreamRequestHandler):
                 socket_ssl.do_handshake()
                 break
             except (ssl.SSLError, IOError):
-                # proxystate.log.error(e.__str__())
+                proxystate.log.error(e.__str__())
                 return
 
         # Switch to new socket
@@ -210,9 +221,10 @@ class ProxyHandler(SocketServer.StreamRequestHandler):
             res = conn.getresponse()
         except httplib.HTTPException as e:
             proxystate.log.debug(e.__str__())
+            proxystate.log.error("Error, empty response from server %s" % conn.host)
             # FIXME: check the return value into the do* methods
-            return None
-
+            res = HTTPResponse("HTTP/1.0", '504', 'Proxy Error', {}, '<h1>Proxy Error.</h1>')
+            return res
         body = res.read()
         if res.version == 10:
             proto = "HTTP/1.0"
@@ -318,7 +330,7 @@ class ProxyPlugin:
         return r
 
     @staticmethod
-    def delegate(event, arg):
+    def delegate(event, arg, host = None):
         global proxystate
 
         # Allocate a history entry
@@ -334,7 +346,7 @@ class ProxyPlugin:
             proxystate.history[hid].setOriginalResponse(arg)
 
             # Process this argument through the plugin
-            mangled_arg = proxystate.plugin.dispatch(ProxyPlugin.EVENT_MANGLE_RESPONSE, arg.clone())
+            mangled_arg = proxystate.plugin.dispatch(ProxyPlugin.EVENT_MANGLE_RESPONSE, arg.clone(), host)
 
         if mangled_arg is not None:
             if event == ProxyPlugin.EVENT_MANGLE_REQUEST:

@@ -109,12 +109,12 @@ class HTTPMessage():
         return body
 
     def isChunked(self):
-        r = False
-        for n, v in self.headers.iteritems():
-            if n.lower() == "transfer-encoding" and v[0].lower() == "chunked":
-                r = True
-                break
-        return r
+        normalized = dict((k.lower(), {'values': [i.lower() for i in v], 'head': k} ) for k,v in self.headers.iteritems())
+        is_chunked = 'transfer-encoding' in normalized and 'chunked' in normalized['transfer-encoding']['values']
+        if is_chunked:
+            del self.headers[normalized['transfer-encoding']['head']]
+            return True
+        return False
 
     def isKeepAlive(self):
         if 'Connection' in self.headers:
@@ -315,6 +315,8 @@ class HTTPResponse(HTTPMessage):
         s = "%s %s %s" % (self.proto, self.code, self.msg)
         s += HTTPMessage.EOL
 
+        #as we sanitize headers in isChunked, move it here
+        chunked = self.isChunked()
         # Headers
         for n,v in self.headers.iteritems():
 	    for i in v:
@@ -324,14 +326,7 @@ class HTTPResponse(HTTPMessage):
         s += HTTPMessage.EOL
 
         # Body
-        if not self.isChunked():
-            s += self.body
-        else:
-            # FIXME: Make a single-chunk body
-            s += "%x" % len(self.body) + HTTPMessage.EOL
-            s += self.body + HTTPMessage.EOL
-            s += HTTPMessage.EOL
-            s += "0" + HTTPMessage.EOL + HTTPMessage.EOL
+        s += self.body
 
         return s
 
